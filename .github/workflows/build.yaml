@@ -1,0 +1,125 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        backend: [xnnpack]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git cmake ninja-build make g++ curl python3-venv xz-utils
+
+      - name: Build
+        run: ./build.sh ${{ matrix.backend }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.backend }}-${{ runner.arch }}
+          path: dist/executorch-*
+
+      # The numerics gate runs the same kernels as the worker
+      - uses: actions/upload-artifact@v4
+        with:
+          name: logits-check-${{ matrix.backend }}-${{ runner.arch }}
+          path: work/worker-${{ matrix.backend }}/logits-check
+
+  model:
+    needs: runtime
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [qwen3-0-6b-xnnpack]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install export tools
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install --index-strategy unsafe-best-match \
+            --extra-index-url https://download.pytorch.org/whl/cpu -r tools/requirements-export.txt
+
+      - name: Export
+        run: .venv/bin/python tools/export.py models/${{ matrix.model }}.yaml
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: logits-check-xnnpack-X64
+          path: bin
+
+      - name: Numerics gate
+        run: |
+          chmod +x bin/logits-check
+          .venv/bin/python tools/validate.py \
+            --model-dir dist/models/${{ matrix.model }} \
+            --logits-check bin/logits-check \
+            --chunk 4096 \
+            --report dist/models/${{ matrix.model }}/validation.json
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime-xnnpack-X64
+          path: dist
+
+      - name: OpenAI conformance
+        run: |
+          version="$(cat EXECUTORCH_VERSION)"
+          mkdir -p work/runtime work/conformance
+          tar -xJf dist/executorch-xnnpack-amd64.tar.xz -C work/runtime
+          curl -fsSL -o work/conformance/test_openai_contract.py \
+            "https://raw.githubusercontent.com/pytorch/executorch/v$version/examples/llm_server/conformance/test_openai_contract.py"
+          model=dist/models/${{ matrix.model }}
+          eos="$(jq -r '.runtime.extra_eos_tokens // [] | join(",")' "$model/manifest.json")"
+          max_ctx="$(jq -r '.export.max_seq_len' "$model/manifest.json")"
+          PYTHONPATH=work/runtime:work/runtime/lib/python EXECUTORCH_EXTRA_EOS_TOKENS="$eos" HF_HUB_OFFLINE=1 \
+            python3.12 -s -m llm_server.server \
+              --worker-bin work/runtime/bin/xnnpack-text-worker \
+              --model-path "$model/model.pte" --tokenizer-path "$model/tokenizer.json" \
+              --hf-tokenizer "$model" --max-context "$max_ctx" \
+              --model-id ${{ matrix.model }} --port 8000 &
+          for i in $(seq 1 120); do curl -sf http://127.0.0.1:8000/health && break; sleep 1; done
+          uv pip install --python .venv pytest
+          OPENAI_BASE_URL=http://127.0.0.1:8000/v1 OPENAI_MODEL=${{ matrix.model }} \
+            .venv/bin/python -m pytest -q -p no:cacheprovider --rootdir work/conformance work/conformance/test_openai_contract.py
+
+      - name: Package
+        run: tar -C dist/models/${{ matrix.model }} -cf dist/${{ matrix.model }}.tar .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: model-${{ matrix.model }}
+          path: dist/${{ matrix.model }}.tar
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [runtime, model]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{runtime,model}-*"
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* --repo "${{ github.repository }}" --generate-notes

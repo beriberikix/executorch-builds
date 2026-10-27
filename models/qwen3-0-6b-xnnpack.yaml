@@ -1,0 +1,22 @@
+name: qwen3-0-6b-xnnpack
+source: Qwen/Qwen3-0.6B
+backend: xnnpack
+
+export:
+  tool: optimum-executorch
+  recipe: xnnpack
+  qlinear: 8da4w
+  qembedding: 8w
+  max_seq_len: 4096
+  use_custom_sdpa: true
+  use_custom_kv_cache: true
+
+# Passed to the worker through the model's model.yaml in the snap
+runtime:
+  extra_eos_tokens: ["<|im_end|>"]
+
+# Top-1 agreement with the eager model quantized the same way, over
+# tools/prompts.json. Measured 0.88 (token-by-token prefill) to 0.92
+# (whole-prompt prefill) with ExecuTorch 1.5.1 on x86.
+gate:
+  min_top1: 0.85

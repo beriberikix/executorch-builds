@@ -1,0 +1,12 @@
+# Export and validation environment. Install with
+#   uv pip install --index-strategy unsafe-best-match \
+#     --extra-index-url https://download.pytorch.org/whl/cpu -r tools/requirements-export.txt
+# executorch must match EXECUTORCH_VERSION, the runtime the .pte runs on.
+executorch==1.5.1
+optimum-executorch==1.1.0
+optimum==2.0.0
+torch==2.14.1
+torchao==0.18.0
+transformers==5.0.0rc1
+huggingface-hub==1.33.0
+pyyaml==6.0.3
