@@ -29,8 +29,10 @@ TOKENIZER_FILES = [
 
 def optimum_command(spec: dict, out: Path) -> list[str]:
     export = spec["export"]
+    # The CLI installed next to this interpreter, whether or not its venv is on PATH
+    cli = Path(sys.executable).parent / "optimum-cli"
     cmd = [
-        "optimum-cli", "export", "executorch",
+        str(cli) if cli.exists() else "optimum-cli", "export", "executorch",
         "--model", spec["source"],
         "--task", "text-generation",
         "--recipe", export["recipe"],
