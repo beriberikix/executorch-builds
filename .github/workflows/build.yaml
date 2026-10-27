@@ -1,66 +1,112 @@
 name: Build
 
+# Like canonical/llama.cpp-builds: publishing a release builds every runtime
+# and model and attaches them to it. Pushes and pull requests run the same
+# builds and checks without publishing.
 on:
+  release:
+    types: [published]
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
 jobs:
   runtime:
+    permissions:
+      contents: write # for uploading release assets
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        jobs:
+          - name: amd64
+            runs-on: ubuntu-24.04
+          - name: arm64
+            runs-on: ubuntu-24.04-arm
         backend: [xnnpack]
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.jobs.runs-on }}
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git cmake ninja-build make g++ curl python3-venv xz-utils
+          sudo apt-get install -y git cmake ninja-build make g++ curl python3-venv xz-utils ccache
+
+      - name: Read versions
+        id: versions
+        run: echo "executorch=$(cat EXECUTORCH_VERSION)" >> "$GITHUB_OUTPUT"
+
+      # The ExecuTorch checkout with submodules is slow to clone (and Eigen's
+      # GitLab often refuses clones), so keep it between runs.
+      - name: Cache ExecuTorch source
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: work/src
+          key: executorch-src-${{ steps.versions.outputs.executorch }}
+
+      # Build-only venv with CPU PyTorch for ExecuTorch's kernel codegen
+      - name: Cache build venv
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: work/build-venv
+          key: build-venv-${{ matrix.jobs.name }}-${{ steps.versions.outputs.executorch }}-${{ hashFiles('backends/*/requirements.txt') }}
+
+      - uses: hendrikmuhs/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d # v1.2.24
+        with:
+          key: ${{ matrix.jobs.name }}-${{ matrix.backend }}-${{ steps.versions.outputs.executorch }}
+          max-size: 2G
 
       - name: Build
         run: ./build.sh ${{ matrix.backend }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: runtime-${{ matrix.backend }}-${{ runner.arch }}
+          name: runtime-${{ matrix.backend }}-${{ matrix.jobs.name }}
           path: dist/executorch-*
 
       # The numerics gate runs the same kernels as the worker
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: logits-check-${{ matrix.backend }}-${{ runner.arch }}
+          name: logits-check-${{ matrix.backend }}-${{ matrix.jobs.name }}
           path: work/worker-${{ matrix.backend }}/logits-check
+
+      - name: Upload runtime to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: dist/executorch-*
 
   model:
     needs: runtime
+    permissions:
+      contents: write # for uploading release assets
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         model: [qwen3-0-6b-xnnpack]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
 
       - name: Install export tools
         run: |
           uv venv --python 3.12 .venv
-          uv pip install --index-strategy unsafe-best-match \
-            --extra-index-url https://download.pytorch.org/whl/cpu -r tools/requirements-export.txt
+          uv pip install --python .venv --index-strategy unsafe-best-match \
+            --extra-index-url https://download.pytorch.org/whl/cpu -r tools/requirements-export.txt pytest
 
       - name: Export
         run: .venv/bin/python tools/export.py models/${{ matrix.model }}.yaml
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: logits-check-xnnpack-X64
+          name: logits-check-xnnpack-amd64
           path: bin
 
       - name: Numerics gate
@@ -72,9 +118,9 @@ jobs:
             --chunk 4096 \
             --report dist/models/${{ matrix.model }}/validation.json
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: runtime-xnnpack-X64
+          name: runtime-xnnpack-amd64
           path: dist
 
       - name: OpenAI conformance
@@ -94,32 +140,22 @@ jobs:
               --hf-tokenizer "$model" --max-context "$max_ctx" \
               --model-id ${{ matrix.model }} --port 8000 &
           for i in $(seq 1 120); do curl -sf http://127.0.0.1:8000/health && break; sleep 1; done
-          uv pip install --python .venv pytest
           OPENAI_BASE_URL=http://127.0.0.1:8000/v1 OPENAI_MODEL=${{ matrix.model }} \
             .venv/bin/python -m pytest -q -p no:cacheprovider --rootdir work/conformance work/conformance/test_openai_contract.py
 
       - name: Package
         run: tar -C dist/models/${{ matrix.model }} -cf dist/${{ matrix.model }}.tar .
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: model-${{ matrix.model }}
-          path: dist/${{ matrix.model }}.tar
+          path: |
+            dist/${{ matrix.model }}.tar
+            dist/models/${{ matrix.model }}/validation.json
 
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [runtime, model]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
+      - name: Upload model to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          pattern: "{runtime,model}-*"
-          path: dist
-          merge-multiple: true
-
-      - name: Publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/* --repo "${{ github.repository }}" --generate-notes
+          tag_name: ${{ github.event.release.tag_name }}
+          files: dist/${{ matrix.model }}.tar

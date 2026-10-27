@@ -84,7 +84,12 @@ an upstream question, not a blocker.
 
 ## CI and releases
 
-[`.github/workflows/build.yaml`](.github/workflows/build.yaml) builds the runtime on amd64 and arm64, exports
-each model, runs the numerics gate and ExecuTorch's OpenAI conformance suite against the runtime, and on a
-`v*` tag publishes everything to a release (`v<executorch version>-r<n>`): runtime tarballs with checksums,
-and `<model>.tar` with its manifest and validation report.
+[`.github/workflows/build.yaml`](.github/workflows/build.yaml) follows `llama.cpp-builds`: publishing a
+GitHub release (tag `v<executorch version>-r<n>`, e.g. `v1.5.1-r1`) builds the runtime on native amd64 and
+arm64 runners, exports each model, runs the numerics gate and ExecuTorch's OpenAI conformance suite against
+the runtime, and attaches the results to the release with `softprops/action-gh-release`: runtime tarballs
+with checksums, and `<model>.tar` with its manifest and validation report. Pushes and pull requests run the
+same jobs without publishing. The ExecuTorch checkout, the build venv and a ccache are cached between runs.
+
+Assets are at `https://github.com/beriberikix/executorch-builds/releases/download/<tag>/<file>`, which is
+where model snaps fetch them.
