@@ -97,7 +97,7 @@ cat > "$stage/BUILD_INFO.json" <<EOF
   "arch": "$arch",
   "executorch_version": "$version",
   "executorch_commit": "$(git -C "$src" rev-parse HEAD)",
-  "builds_commit": "$(git -C "$root" rev-parse --verify --quiet HEAD || echo unknown)",
+  "builds_commit": "${BUILDS_COMMIT:-$(git -C "$root" rev-parse --verify --quiet HEAD || echo unknown)}",
   "torch_version_for_codegen": "$torch_version",
   "python": "$("$python" -c 'import sys; print("%d.%d" % sys.version_info[:2])')",
   "worker": "bin/$worker"
