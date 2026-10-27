@@ -75,7 +75,7 @@ def main() -> int:
         shutil.move(Path(tmp) / "model.pte", out / "model.pte")
 
     for name in TOKENIZER_FILES:
-        shutil.copy(hf_hub_download(spec["source"], name, revision=revision), out / name)
+        shutil.copyfile(hf_hub_download(spec["source"], name, revision=revision), out / name)
 
     files = ["model.pte", *TOKENIZER_FILES]
     manifest = {
